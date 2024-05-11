@@ -5,36 +5,69 @@ const heap = std.heap;
 const io = std.io;
 const process = std.process;
 
-const Dependency = @import("Dependency.zig");
-const fetch = @import("fetch.zig").fetch;
 const parse = @import("parse.zig").parse;
-const write = @import("codegen.zig").write;
+
+const Options = enum {
+    BuildRequires,
+};
 
 pub fn main() !void {
     var args = process.args();
     _ = args.skip();
     const dir = fs.cwd();
 
-    const file = try if (args.next()) |path|
-        if ((try dir.statFile(path)).kind == .directory)
-            (try dir.openDir(path, .{})).openFile("build.zig.zon", .{})
+    const option = if (args.next()) |option|
+        if (std.mem.eql(u8, option, "buildrequires"))
+            Options.BuildRequires
         else
-            dir.openFile(path, .{})
+            null
     else
-        dir.openFile("build.zig.zon", .{});
+        null;
+
+    if (option == null) {
+        std.debug.print("No valid option given\n", .{});
+        return error.invalidOption;
+    }
+
+    const file = try if (args.next()) |path| blk: {
+        const path_stat = dir.statFile(path) catch |err| {
+            std.debug.print("Failed to stat given path ({})\n", .{err});
+            return error.invalidPath;
+        };
+
+        break :blk switch (path_stat.kind) {
+            .directory => (try dir.openDir(path, .{})).openFile("build.zig.zon", .{}),
+            .file => dir.openFile(path, .{}),
+            else => error.invalidKind,
+        } catch |err| {
+            std.debug.print("Failed to read zon ({})\n", .{err});
+            return error.invalidPath;
+        };
+    } else dir.openFile("build.zig.zon", .{});
     defer file.close();
 
-    var arena = heap.ArenaAllocator.init(heap.raw_c_allocator);
+    var arena = heap.ArenaAllocator.init(heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var deps = StringHashMap(Dependency).init(alloc);
-    try parse(alloc, &deps, file);
-    try fetch(alloc, &deps);
+    const data = parse(alloc, file) catch |err| {
+        std.debug.print("Failed to parse zon ({})\n", .{err});
+        return;
+    };
 
-    var out = io.bufferedWriter(io.getStdOut().writer());
-    try write(alloc, out.writer(), deps);
-    try out.flush();
+    const stdout_file = std.io.getStdOut().writer();
+    var bw = std.io.bufferedWriter(stdout_file);
+    const stdout = bw.writer();
+
+    switch (option.?) {
+        .BuildRequires => {
+            var iter = data.dependencies.valueIterator();
+            while (iter.next()) |dep| {
+                try stdout.print("zig({s})\n", .{dep.hash});
+            }
+        },
+    }
+    try bw.flush();
 }
 
 comptime {
