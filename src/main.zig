@@ -6,19 +6,25 @@ const io = std.io;
 const process = std.process;
 
 const parse = @import("parse.zig").parse;
+const findZon = @import("parse.zig").findZon;
 
 const Options = enum {
     BuildRequires,
+    Show,
+    Spec
 };
 
 pub fn main() !void {
     var args = process.args();
     _ = args.skip();
-    const dir = fs.cwd();
 
     const option = if (args.next()) |option|
         if (std.mem.eql(u8, option, "buildrequires"))
             Options.BuildRequires
+        else if (std.mem.eql(u8, option, "show"))
+            Options.Show
+        else if (std.mem.eql(u8, option, "spec"))
+            Options.Spec
         else
             null
     else
@@ -29,31 +35,23 @@ pub fn main() !void {
         return error.invalidOption;
     }
 
-    const file = try if (args.next()) |path| blk: {
-        const path_stat = dir.statFile(path) catch |err| {
-            std.debug.print("Failed to stat given path ({})\n", .{err});
-            return error.invalidPath;
-        };
+    const path = args.next();
+    if (path == null) {
+        std.debug.print("No valid option given\n", .{});
+        return error.invalidOption;
+    }
 
-        break :blk switch (path_stat.kind) {
-            .directory => (try dir.openDir(path, .{})).openFile("build.zig.zon", .{}),
-            .file => dir.openFile(path, .{}),
-            else => error.invalidKind,
-        } catch |err| {
-            std.debug.print("Failed to read zon ({})\n", .{err});
-            return error.invalidPath;
-        };
-    } else dir.openFile("build.zig.zon", .{});
+    try std.posix.chdir(path.?);
+
+    const dir = fs.cwd();
+    const file = try findZon(dir, "build.zig.zon");
     defer file.close();
 
     var arena = heap.ArenaAllocator.init(heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const data = parse(alloc, file) catch |err| {
-        std.debug.print("Failed to parse zon ({})\n", .{err});
-        return;
-    };
+    const data = try parse(alloc, dir, file);
 
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
@@ -64,6 +62,21 @@ pub fn main() !void {
             var iter = data.dependencies.valueIterator();
             while (iter.next()) |dep| {
                 try stdout.print("zig({s})\n", .{dep.hash});
+            }
+        },
+
+        .Show => {
+            var iter = data.dependencies.iterator();
+            while (iter.next()) |dep| {
+                try stdout.print("{s} => {s}\n", .{dep.key_ptr.*, dep.value_ptr.hash});
+            }
+        },
+
+        .Spec => {
+            var iter = data.dependencies.valueIterator();
+            var i: u8 = 1;
+            while (iter.next()) |dep| : (i += 1) {
+                try stdout.print("Source{}: {s}\n", .{i, dep.url});
             }
         },
     }

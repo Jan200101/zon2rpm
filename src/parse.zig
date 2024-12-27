@@ -4,6 +4,7 @@ const Ast = std.zig.Ast;
 const File = std.fs.File;
 const Index = std.zig.Ast.Node.Index;
 const StringHashMap = std.StringHashMap;
+const fs = std.fs;
 const mem = std.mem;
 const string_literal = std.zig.string_literal;
 
@@ -18,7 +19,20 @@ const ZonData = struct {
     dependencies: StringHashMap(ZonDependency),
 };
 
-pub fn parse(alloc: Allocator, file: File) !ZonData {
+pub fn findZon(dir: fs.Dir, path: []const u8) !File {
+    const path_stat = try dir.statFile(path);
+
+    return switch (path_stat.kind) {
+        .directory => (try dir.openDir(path, .{})).openFile("build.zig.zon", .{}),
+        .file => dir.openFile(path, .{}),
+        else => error.invalidKind,
+    } catch |err| {
+        std.debug.print("Failed to read zon ({})\n", .{err});
+        return error.invalidPath;
+    };
+}
+
+pub fn parse(alloc: Allocator, dir: fs.Dir, file: File) !ZonData {
     const content = try alloc.allocSentinel(u8, try file.getEndPos(), 0);
     _ = try file.reader().readAll(content);
 
@@ -46,12 +60,9 @@ pub fn parse(alloc: Allocator, file: File) !ZonData {
             };
 
             for (deps_init.ast.fields) |dep_idx| {
-                var dep: ZonDependency = .{
-                    .url = undefined,
-                    .hash = undefined,
-                };
-                var has_url = false;
-                var has_hash = false;
+                const dep_name = try parseFieldName(alloc, ast, dep_idx);
+                var url: ?[]const u8 = null;
+                var hash: ?[]const u8 = null;
 
                 var dep_buf: [2]Index = undefined;
                 const dep_init = ast.fullStructInit(&dep_buf, dep_idx) orelse {
@@ -61,19 +72,35 @@ pub fn parse(alloc: Allocator, file: File) !ZonData {
                 for (dep_init.ast.fields) |dep_field_idx| {
                     const name = try parseFieldName(alloc, ast, dep_field_idx);
 
-                    if (mem.eql(u8, name, "url")) {
-                        dep.url = try parseString(alloc, ast, dep_field_idx);
-                        has_url = true;
+                    if (mem.eql(u8, name, "path")) {
+                        const path = try parseString(alloc, ast, dep_field_idx);
+
+                        const zon_dir = try dir.openDir(path, .{});
+                        const zon_file = findZon(zon_dir, "build.zig.zon") catch continue;
+
+                        const zon_data = try parse(alloc, zon_dir, zon_file);
+
+                        var iter = zon_data.dependencies.iterator();
+                        while (iter.next()) |dep| {
+                            try data.dependencies.put(dep.key_ptr.*, dep.value_ptr.*);
+                        }
+
+                    } else if (mem.eql(u8, name, "url")) {
+                        url = try parseString(alloc, ast, dep_field_idx);
                     } else if (mem.eql(u8, name, "hash")) {
-                        dep.hash = try parseString(alloc, ast, dep_field_idx);
-                        has_hash = true;
+                        hash = try parseString(alloc, ast, dep_field_idx);
                     }
                 }
 
-                if (has_url and has_hash) {
-                    try data.dependencies.putNoClobber(dep.hash, dep);
-                } else {
-                    return error.parseError;
+                if (url) |dep_url| {
+                    if (hash) |dep_hash| {
+                       try data.dependencies.putNoClobber(dep_name, .{
+                            .url = dep_url,
+                            .hash = dep_hash,
+                        });
+                    } else {
+                        std.debug.print("unsuited dependency {s}\n", .{dep_url});
+                    }
                 }
             }
         }

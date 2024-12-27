@@ -1,3 +1,4 @@
-/result
-/zig-cache
-/zig-out
+result
+zig-cache
+.zig-cache
+zig-out
